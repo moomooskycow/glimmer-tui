@@ -187,6 +187,7 @@ export function renderScreen(opts: {
 
   let bytes = "\x1b[?2026h";
   if (mode === "kitty-direct") bytes += deleteAllImages(opts.tmux);
+  if (mode === "sixel") bytes += "\x1b[?80l\x1b[2J\x1b[H";
 
   if (mode === "kitty-unicode") {
     const seen = new Set<number>();
@@ -210,6 +211,11 @@ export function renderScreen(opts: {
   bytes += `\x1b[1;1H\x1b[2K${fit(header, cols)}`;
 
   const imageOrigins = new Map<number, number>();
+  const visibleImageRows = new Map<number, number>();
+  for (const line of visible) {
+    if (line.kind !== "image") continue;
+    visibleImageRows.set(line.block.imageId, (visibleImageRows.get(line.block.imageId) ?? 0) + 1);
+  }
   for (let index = 0; index < visible.length; index++) {
     const line = visible[index];
     const screenRow = index + 2;
@@ -259,8 +265,8 @@ export function renderScreen(opts: {
       frozen: line.block.frozen,
       hits: [],
     });
-    if (line.imageRow !== 0) continue;
     if (mode === "kitty-direct") {
+      if (line.imageRow !== 0) continue;
       bytes += `\x1b[${screenRow};${indent + 1}H${encodeKittyPng(line.block.png, {
         id: imageId,
         cols: line.block.cols,
@@ -269,7 +275,11 @@ export function renderScreen(opts: {
         tmux: opts.tmux,
       })}`;
     } else if (mode === "sixel") {
-      bytes += `\x1b[${screenRow};${indent + 1}H${encodeSixel(line.block.png)}`;
+      bytes += `\x1b[${screenRow};${indent + 1}H${encodeSixel(line.block.png, {
+        firstRow: line.imageRow,
+        rows: visibleImageRows.get(imageId) ?? line.block.rows,
+        totalRows: line.block.rows,
+      })}`;
     }
   }
 

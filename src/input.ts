@@ -41,6 +41,12 @@ export class InputParser {
       this.buffer = buffer.slice(match[1].length);
       return { type: "mouse", mouse: decodeSgr(match[1]) };
     }
+    if (buffer.startsWith("\x1b[?")) {
+      const match = /^\x1b\[\?[0-9;]*[A-Za-z~]/.exec(buffer);
+      if (!match) return "wait";
+      this.buffer = buffer.slice(match[0].length);
+      return null;
+    }
     if (buffer.startsWith("\x1b[")) {
       const match = /^\x1b\[([0-9;]*)([A-Za-z~])/.exec(buffer);
       if (!match) return "wait";

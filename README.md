@@ -67,15 +67,16 @@ npm run gallery
 | Kitty | Unicode placeholders | Best path. Images are grid text, so they scroll with the transcript. |
 | Ghostty | Unicode placeholders | Full Kitty graphics protocol, including placeholders. |
 | WezTerm | Direct Kitty placement | Placeholder support is not in a stable release yet, so Glimmer places at the cursor and deletes old placements before each frame. |
-| xterm, foot, mlterm, WezTerm | Sixel via `--render sixel` | 64-color encoder. Coarser than PNG. |
+| foot | Sixel, chosen automatically | `TERM=foot` or `TERM=foot-extra`. Adaptive palette, up to 256 colors, with dither held back on flat fills and text edges. |
+| xterm, mlterm, WezTerm | Sixel when DA1 reports it, or `--render sixel` | Same encoder. The probe is one 80ms read of cell size, background, and primary DA, and only runs when auto mode is still undecided. |
 | Anything else | Text | Same events, keyboard and cell clicks. |
 
-Auto detection checks `KITTY_WINDOW_ID`, `GHOSTTY_RESOURCES_DIR`, `TERM`, and `WEZTERM_PANE`. Inside tmux, Kitty sequences are wrapped for passthrough; the tmux config still needs `allow-passthrough on`.
+Auto detection checks `KITTY_WINDOW_ID`, `GHOSTTY_RESOURCES_DIR`, `TERM` (`foot`, `foot-extra`, Kitty, Ghostty), `WEZTERM_PANE`, then primary DA attribute 4. Kitty and WezTerm win over a sixel-capable DA reply. Inside tmux, Kitty sequences are wrapped for passthrough; the tmux config still needs `allow-passthrough on`. Foot uses SGR cell mouse (`1006`); it does not use xterm 1016 pixel mode.
 
 ## Known limits
 
-- The live session uses the alternate screen so hit testing has a stable viewport. On exit, Glimmer prints the transcript into the normal buffer. That is the scrollback copy. Resizing during the session refits live pages; frozen bitmaps are rescaled rather than reflowed.
-- Direct placement and sixel can clip a card whose top has scrolled off the viewport. Unicode placeholders do not.
+- The live session uses the alternate screen so hit testing has a stable viewport. On exit, Glimmer prints the transcript into the normal buffer. That is the scrollback copy. Resizing re-queries the cell size, refits live pages, and rescales frozen bitmaps into the new cell grid.
+- Sixel frames enable sixel scrolling (`CSI ? 80 l`, the inverted DECSDM sense foot uses), erase the alt screen, and crop the bitmap to the visible rows, so a scroll or resize does not leave the previous image behind. A card whose top has scrolled away is the remaining slice, not a second copy. Kitty direct placement still drops a card until its top row is back on screen. Unicode placeholders scroll as text.
 - Hover tracking (`1003`) re-rasterizes on a short debounce. Typing feels like a local page, with about one frame of screenshot delay.
 - Pixel-perfect hits need `--mouse pixel`. The default aims at the center of the cell, which is enough for these full-width controls.
 - Constrained HTML is stripped of scripts and remote URLs. That is a prototype filter, not a security boundary.

@@ -1,8 +1,10 @@
+import { da1SupportsSixel } from "./detect.js";
 import { InputParser, keyToDom, type MouseEvent } from "./input.js";
 import { runLoopUntilIdle, type View } from "./loop.js";
 import { OPENING_USER, SYSTEM_PROMPT, type Model } from "./model.js";
 import { mapPointer } from "./pointer.js";
 import { normalizeCell } from "./pointer.js";
+import { resamplePng } from "./sixel.js";
 import {
   pngHash,
   renderLinear,
@@ -58,6 +60,7 @@ class TerminalApp {
   private pumping = false;
   private queue: string[] = [];
   private onData: ((chunk: Buffer) => void) | null = null;
+  private onResize: (() => void) | null = null;
 
   constructor(
     private readonly opts: TuiOptions,
@@ -109,7 +112,8 @@ class TerminalApp {
     process.stdin.setRawMode?.(true);
     process.stdin.resume();
     const mouse = this.opts.mouse === "pixel" ? "\x1b[?1016h" : "";
-    process.stdout.write(`\x1b[?1049h\x1b[?1000h\x1b[?1003h\x1b[?1006h${mouse}\x1b[?25l`);
+    const sixel = this.opts.mode === "sixel" ? "\x1b[?80l" : "";
+    process.stdout.write(`\x1b[?1049h${sixel}\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h${mouse}\x1b[?25l`);
     this.onData = (chunk) => {
       const events = this.parser.push(chunk.toString("utf8"));
       for (const event of events) this.enqueue(() => this.handle(event));
@@ -119,15 +123,10 @@ class TerminalApp {
       for (const event of this.parser.flushEscape()) this.enqueue(() => this.handle(event));
     }, 30);
     this.escapeTimer = escapeTimer;
-    process.on("SIGWINCH", () => {
-      const size = readSize();
-      this.cols = size.cols;
-      this.rows = size.rows;
-      const cell = normalizeCell(size.cellWidth, size.cellHeight);
-      this.cellWidth = cell.cellWidth;
-      this.cellHeight = cell.cellHeight;
-      this.paint();
-    });
+    this.onResize = () => {
+      this.enqueue(() => this.applyResize());
+    };
+    process.on("SIGWINCH", this.onResize);
   }
 
   private escapeTimer: NodeJS.Timeout | null = null;
@@ -137,9 +136,10 @@ class TerminalApp {
     this.closed = true;
     if (this.escapeTimer) clearInterval(this.escapeTimer);
     if (this.hoverTimer) clearTimeout(this.hoverTimer);
+    if (this.onResize) process.off("SIGWINCH", this.onResize);
     if (this.onData) process.stdin.off("data", this.onData);
     const mouse = this.opts.mouse === "pixel" ? "\x1b[?1016l" : "";
-    process.stdout.write(`\x1b[?1000l\x1b[?1003l\x1b[?1006l${mouse}\x1b[?25h\x1b[?1049l`);
+    process.stdout.write(`\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l${mouse}\x1b[?25h\x1b[?1049l`);
     process.stdin.setRawMode?.(false);
     process.stdin.pause();
     if (dump) {
@@ -435,6 +435,66 @@ class TerminalApp {
     return { cellWidth: this.cellWidth, cellHeight: this.cellHeight, dpr: this.dpr };
   }
 
+  private detachInput(): void {
+    if (this.onData) process.stdin.off("data", this.onData);
+  }
+
+  private attachInput(): void {
+    if (this.onData) process.stdin.on("data", this.onData);
+  }
+
+  private async applyResize(): Promise<void> {
+    if (this.closed) return;
+    this.cols = process.stdout.columns || this.cols;
+    this.rows = process.stdout.rows || this.rows;
+    if (process.stdin.isTTY) {
+      this.detachInput();
+      try {
+        const probed = await queryTerminal({ sixel: false, timeoutMs: TERMINAL_PROBE_MS });
+        if (probed.cellWidth > 0 && probed.cellHeight > 0) {
+          this.cellWidth = probed.cellWidth;
+          this.cellHeight = probed.cellHeight;
+        }
+      } finally {
+        this.attachInput();
+      }
+    }
+    await this.refitBlocks();
+    this.sent.clear();
+    this.paint();
+  }
+
+  private async refitBlocks(): Promise<void> {
+    if (!this.opts.renderer || this.opts.mode === "text") return;
+    const cols = Math.max(24, Math.min(72, this.cols - 4));
+    for (const block of this.blocks) {
+      if (block.kind !== "component" || !block.png) continue;
+      if (!block.frozen) {
+        try {
+          const raster = await this.opts.renderer.refit(block.spec.id, {
+            cols,
+            cellWidth: this.cellWidth,
+            cellHeight: this.cellHeight,
+            dpr: this.dpr,
+            maxRows: Math.max(4, this.rows - 6),
+          });
+          block.png = raster.png;
+          block.cols = raster.cols;
+          block.rows = raster.rows;
+          block.hash = pngHash(raster.png);
+          continue;
+        } catch {
+          // The live page is already closed. Fall through and rescale the bitmap.
+        }
+      }
+      const next = resamplePng(block.png, block.cols * this.cellWidth, block.rows * this.cellHeight);
+      if (next !== block.png) {
+        block.png = next;
+        block.hash = pngHash(next);
+      }
+    }
+  }
+
   private paint(): void {
     if (this.closed) return;
     const frame = renderScreen({
@@ -466,50 +526,95 @@ function readSize(): { cols: number; rows: number; cellWidth: number; cellHeight
   return { cols, rows, cellWidth: 10, cellHeight: 20 };
 }
 
+/** One shared probe window. Stacking per-query timers made every terminal wait twice. */
+export const TERMINAL_PROBE_MS = 80;
+
+export interface TerminalInfo {
+  cellWidth: number;
+  cellHeight: number;
+  theme: Theme | null;
+  sixel: boolean;
+}
+
+export interface TerminalReplies {
+  cellWidth: number;
+  cellHeight: number;
+  theme: Theme | null;
+  sixel: boolean;
+  sawPrimaryDa: boolean;
+  sawCell: boolean;
+  sawTheme: boolean;
+}
+
+export function readTerminalReplies(buffer: string): TerminalReplies {
+  const cell = /\x1b\[6;(\d+);(\d+)t/.exec(buffer);
+  const background = /rgb:([0-9a-fA-F]+)\/([0-9a-fA-F]+)\/([0-9a-fA-F]+)/.exec(buffer);
+  let theme: Theme | null = null;
+  if (background) {
+    const channel = (hex: string) => parseInt(hex.slice(0, 2), 16);
+    const red = channel(background[1] ?? "00");
+    const green = channel(background[2] ?? "00");
+    const blue = channel(background[3] ?? "00");
+    const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    theme = luminance < 140 ? "dark" : "light";
+  }
+  return {
+    cellWidth: cell ? Number(cell[2]) : 0,
+    cellHeight: cell ? Number(cell[1]) : 0,
+    theme,
+    sixel: da1SupportsSixel(buffer),
+    sawPrimaryDa: /\x1b\[\?[0-9;]*c/.test(buffer),
+    sawCell: Boolean(cell),
+    sawTheme: Boolean(background),
+  };
+}
+
+export async function queryTerminal(opts?: { sixel?: boolean; timeoutMs?: number }): Promise<TerminalInfo> {
+  const empty = { cellWidth: 0, cellHeight: 0, theme: null, sixel: false };
+  if (!process.stdin.isTTY) return empty;
+  const wantSixel = opts?.sixel ?? false;
+  const timeoutMs = opts?.timeoutMs ?? TERMINAL_PROBE_MS;
+  process.stdin.setRawMode?.(true);
+  return new Promise((resolve) => {
+    let buffer = "";
+    const finish = (info: TerminalInfo) => {
+      clearTimeout(timer);
+      process.stdin.off("data", onData);
+      resolve(info);
+    };
+    const onData = (chunk: Buffer) => {
+      buffer += chunk.toString("latin1");
+      const replies = readTerminalReplies(buffer);
+      const sixelDone = !wantSixel || replies.sawPrimaryDa;
+      if (replies.sawCell && replies.sawTheme && sixelDone) {
+        finish({
+          cellWidth: replies.cellWidth,
+          cellHeight: replies.cellHeight,
+          theme: replies.theme,
+          sixel: wantSixel && replies.sixel,
+        });
+      }
+    };
+    const timer = setTimeout(() => {
+      const replies = readTerminalReplies(buffer);
+      finish({
+        cellWidth: replies.cellWidth,
+        cellHeight: replies.cellHeight,
+        theme: replies.theme,
+        sixel: wantSixel && replies.sixel,
+      });
+    }, timeoutMs);
+    process.stdin.on("data", onData);
+    const da1 = wantSixel ? "\x1b[c" : "";
+    process.stdout.write(`\x1b[16t\x1b]11;?\x1b\\${da1}`);
+  });
+}
+
 export async function queryTerminalGeometry(): Promise<{
   cellWidth: number;
   cellHeight: number;
   theme: Theme | null;
 }> {
-  if (!process.stdin.isTTY) return { cellWidth: 0, cellHeight: 0, theme: null };
-  process.stdin.setRawMode?.(true);
-  const cell = await listen("\x1b[16t", (buffer) => {
-    const match = /\x1b\[6;(\d+);(\d+)t/.exec(buffer);
-    if (!match) return null;
-    return { cellHeight: Number(match[1]), cellWidth: Number(match[2]) };
-  });
-  const background = await listen("\x1b]11;?\x1b\\", (buffer) => {
-    const match = /rgb:([0-9a-fA-F]+)\/([0-9a-fA-F]+)\/([0-9a-fA-F]+)/.exec(buffer);
-    if (!match) return null;
-    const channel = (hex: string) => parseInt(hex.slice(0, 2), 16);
-    const red = channel(match[1] ?? "00");
-    const green = channel(match[2] ?? "00");
-    const blue = channel(match[3] ?? "00");
-    const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-    return luminance < 140 ? "dark" : "light";
-  });
-  return {
-    cellWidth: cell?.cellWidth ?? 0,
-    cellHeight: cell?.cellHeight ?? 0,
-    theme: background,
-  };
-}
-
-function listen<T>(query: string, parse: (buffer: string) => T | null): Promise<T | null> {
-  return new Promise((resolve) => {
-    let buffer = "";
-    const onData = (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
-      const parsed = parse(buffer);
-      if (parsed) finish(parsed);
-    };
-    const timer = setTimeout(() => finish(null), 120);
-    const finish = (value: T | null) => {
-      clearTimeout(timer);
-      process.stdin.off("data", onData);
-      resolve(value);
-    };
-    process.stdin.on("data", onData);
-    process.stdout.write(query);
-  });
+  const info = await queryTerminal({ sixel: false });
+  return { cellWidth: info.cellWidth, cellHeight: info.cellHeight, theme: info.theme };
 }

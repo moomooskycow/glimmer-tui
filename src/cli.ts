@@ -1,10 +1,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { detectRenderMode, inTmux } from "./detect.js";
+import { detectRenderMode, inTmux, termIndicatesFoot, wantsSixelProbe } from "./detect.js";
 import { runHeadless } from "./headless.js";
 import { parseSpec } from "./spec.js";
 import { RendererSidecar } from "./sidecar.js";
 import { normalizeCell } from "./pointer.js";
-import { queryTerminalGeometry, runInteractive } from "./tui.js";
+import { queryTerminal, runInteractive } from "./tui.js";
 import { selectModel } from "./model.js";
 import type { Theme } from "./types.js";
 
@@ -91,10 +91,11 @@ async function main(): Promise<void> {
     process.stdout.write(`${result.transcript}\n`);
     return;
   }
-  const probed = await queryTerminalGeometry();
+  const probed = await queryTerminal({ sixel: wantsSixelProbe(process.env, args.render) });
   const theme = args.theme ?? probed.theme ?? "dark";
   const cell = normalizeCell(probed.cellWidth, probed.cellHeight);
-  const mode = detectRenderMode(process.env, args.render);
+  const mode = detectRenderMode(process.env, args.render, probed.sixel);
+  if (termIndicatesFoot() && args.mouse === "pixel") args.mouse = "cell";
   const renderer = mode === "text" ? null : await RendererSidecar.launch(theme, cell.dpr);
   await runInteractive({
     model,

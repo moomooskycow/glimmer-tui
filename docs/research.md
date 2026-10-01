@@ -37,13 +37,15 @@ Glimmer's alt-screen transcript reprints placeholders every frame and retransmit
 
 ### Sixel and text
 
-Sixel ([DEC sixel](https://vt100.net/docs/vt3xx-gp/chapter14.html)) is a second bitmap path: a 64-color encoder, explicit `--render sixel`. It is not the default. Ghostty does not implement sixel. The text renderer draws the same components with the same `UiEvent` actions, so a terminal with no graphics protocol still completes the demo.
+Sixel ([DEC sixel](https://vt100.net/docs/vt3xx-gp/chapter14.html)) is the graphics path for foot, which implements sixel and not Kitty graphics. Pixels are snapped onto the sixel grid first (101 levels per channel). If that set fits in 256 registers, Glimmer keeps every color and does not dither, so antialiased text stays on its real steps. Past 256, median-cut picks a palette and Floyd–Steinberg runs only where a pixel is both far from that palette and not on a high-contrast edge, so flat fills and glyph cores do not speckle. Against the old 4-level quantizer, a 96×32 gradient measured 35.2 dB PSNR versus 18.2 dB, and a dark choice card (480×320, 1068 distinct sixel colors) measured 42.4 dB versus 18.5 dB. Ghostty does not implement sixel. The text renderer draws the same components with the same `UiEvent` actions, so a terminal with no graphics protocol still completes the demo.
+
+Foot is selected with no flag when `TERM` is `foot` or `foot-extra`. Other terminals get one combined 80ms probe (`CSI 16 t`, `OSC 11`, and primary DA `CSI c`). Attribute 4 in the DA1 reply selects sixel. Kitty and WezTerm environment variables are decided before that probe, so a sixel-capable DA cannot override them, and the probe is skipped entirely once a mode is already known.
 
 ### Latency, resize, hit testing
 
 - A warm Chromium screenshot of one card is the dominant cost. The browser stays up for the session; only the page is new. Hover screenshots are debounced (~40ms). Expect roughly one to a few frames of lag, not a round trip to a model.
 - Cell size comes from `CSI 16 t` (and `TIOCGWINSZ` where pixels are filled in). The PNG is `columns × cellWidth` by `rows × cellHeight` physical pixels. `deviceScaleFactor` is 2 when the cell size divides evenly and the cells are small, so HiDPI terminals get a 1:1 bitmap and low-DPI cells get a supersampled one.
-- Resize refits live pages. Frozen cards keep their last PNG and are rescaled into the new cell grid. Historical direct-mode placements are deleted before each frame so they do not ghost.
+- Resize refits live pages after a fresh `CSI 16 t` read. Frozen cards keep their last PNG and are rescaled into the new cell grid. Direct-mode placements are deleted before each frame. Sixel frames erase the display (`CSI 2 J`) and crop to the visible cell rows so scrolled images are not left behind.
 - Pointers are SGR (`1006`) plus motion (`1003`). Cell coordinates hit the center of the cell; `--mouse pixel` turns on xterm 1016 and maps physical pixels. Both paths are pure functions in `src/pointer.ts`. Keyboard (tab, arrows, enter, typing) goes to the focused page, or to the text widget in the fallback.
 
 ### What this does not borrow
