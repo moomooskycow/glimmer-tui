@@ -1,0 +1,26 @@
+{
+  "name": "glimmer",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Agent harness that renders live HTML UI components inside the terminal.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "demo": "tsx src/cli.ts demo",
+    "gallery": "tsx src/cli.ts gallery",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "playwright": "^1.55.0",
+    "pngjs": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/pngjs": "^6.0.5",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
