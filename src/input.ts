@@ -35,23 +35,26 @@ export class InputParser {
 
   private take(): InputEvent | "wait" | null {
     const buffer = this.buffer;
-    if (buffer.startsWith("\x1b[<")) {
-      const match = /^(\x1b\[<\d+;\d+;\d+[Mm])/.exec(buffer);
-      if (!match) return "wait";
-      this.buffer = buffer.slice(match[1].length);
-      return { type: "mouse", mouse: decodeSgr(match[1]) };
-    }
-    if (buffer.startsWith("\x1b[?")) {
-      const match = /^\x1b\[\?[0-9;]*[A-Za-z~]/.exec(buffer);
-      if (!match) return "wait";
-      this.buffer = buffer.slice(match[0].length);
-      return null;
-    }
     if (buffer.startsWith("\x1b[")) {
-      const match = /^\x1b\[([0-9;]*)([A-Za-z~])/.exec(buffer);
-      if (!match) return "wait";
+      // Frame every CSI before decoding the small subset we support: parameter
+      // bytes (0x30-0x3f), intermediate bytes (0x20-0x2f), then a final byte.
+      const match = /^\x1b\[([0-?]*)([ -/]*)([@-~])?/.exec(buffer)!;
+      const params = match[1] ?? "";
+      const intermediate = match[2] ?? "";
+      const final = match[3];
+      if (!final) {
+        if (match[0].length === buffer.length) return "wait";
+        // Discard only the invalid sequence prefix. Reprocess the offending
+        // byte so a new Escape sequence or Ctrl+C can still reach the UI.
+        this.buffer = buffer.slice(match[0].length);
+        return null;
+      }
       this.buffer = buffer.slice(match[0].length);
-      const key = decodeCsi(match[1] ?? "", match[2] ?? "");
+      if (!intermediate && /^<\d+;\d+;\d+$/.test(params) && /^[Mm]$/.test(final)) {
+        return { type: "mouse", mouse: decodeSgr(match[0]) };
+      }
+      if (intermediate || !/^[0-9;]*$/.test(params)) return null;
+      const key = decodeCsi(params, final);
       return key ? { type: "key", key } : null;
     }
     if (buffer.startsWith("\x1b]")) {
